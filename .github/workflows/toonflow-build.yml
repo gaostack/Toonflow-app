@@ -46,3 +46,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Deploy to Coolify
+        if: github.ref == 'refs/heads/master'
+        run: |
+          SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
+          # Update image tag in Coolify
+          curl -sf -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"docker_registry_image_tag\": \"${SHA_TAG}\"}" \
+            "${{ vars.COOLIFY_BASE_URL }}/api/v1/applications/${{ vars.COOLIFY_APP_UUID }}"
+          # Trigger deployment
+          curl -sf -X GET \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            "${{ vars.COOLIFY_BASE_URL }}/api/v1/deploy?uuid=${{ vars.COOLIFY_APP_UUID }}&force=false"
