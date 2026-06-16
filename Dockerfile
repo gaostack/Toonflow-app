@@ -40,21 +40,11 @@ COPY --from=builder /app/data/web ./seed-data/web
 COPY --from=builder /app/data/models ./seed-data/models
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
+
+RUN chmod +x /app/docker-entrypoint.sh
 
 # data 目录通过 Coolify 持久化卷挂载
-# 首次启动时把 web 前端和 embedding 模型复制到持久卷
-RUN echo '#!/bin/sh\n\
-if [ ! -d /app/data/web ]; then\n\
-  echo "Seeding /app/data/web...";\n\
-  mkdir -p /app/data && cp -r /app/seed-data/web /app/data/web;\n\
-fi\n\
-if [ ! -d /app/data/models ]; then\n\
-  echo "Seeding /app/data/models...";\n\
-  mkdir -p /app/data && cp -r /app/seed-data/models /app/data/models;\n\
-fi\n\
-exec node /app/data/serve/app.js\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
 EXPOSE 10588
 
-CMD ["/app/entrypoint.sh"]
+CMD ["/app/docker-entrypoint.sh"]
