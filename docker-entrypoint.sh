@@ -36,4 +36,4 @@ if [ ! -f /app/data/assets/ending.mp4 ]; then
   cp -rn /app/seed-data/assets/. /app/data/assets/
 fi
 
-exec node /app/data/serve/app.js
+exec node /app/serve/app.js

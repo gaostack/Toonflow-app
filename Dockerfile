@@ -35,7 +35,8 @@ ENV NODE_ENV=prod
 ENV PORT=10588
 
 # 只复制生产运行所需文件
-COPY --from=builder /app/data/serve ./data/serve
+# serve 放在 /app/serve（卷挂载点 /app/data 之外），确保每次部署都运行最新代码
+COPY --from=builder /app/data/serve ./serve
 COPY --from=builder /app/data/web ./seed-data/web
 COPY --from=builder /app/data/models ./seed-data/models
 COPY --from=builder /app/data/skills ./seed-data/skills
