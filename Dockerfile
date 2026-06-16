@@ -38,6 +38,7 @@ ENV PORT=10588
 COPY --from=builder /app/data/serve ./data/serve
 COPY --from=builder /app/data/web ./seed-data/web
 COPY --from=builder /app/data/models ./seed-data/models
+COPY --from=builder /app/data/skills ./seed-data/skills
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
