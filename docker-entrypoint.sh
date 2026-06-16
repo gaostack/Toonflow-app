@@ -22,4 +22,18 @@ if [ ! -d /app/data/skills ]; then
   cp -r /app/seed-data/skills /app/data/skills
 fi
 
+# Seed video model prompt templates if not present in persistent volume
+if [ ! -d /app/data/modelPrompt ]; then
+  echo "Seeding /app/data/modelPrompt..."
+  mkdir -p /app/data
+  cp -r /app/seed-data/modelPrompt /app/data/modelPrompt
+fi
+
+# Seed default assets (e.g. ending.mp4) if not present in persistent volume
+if [ ! -d /app/data/assets ]; then
+  echo "Seeding /app/data/assets..."
+  mkdir -p /app/data
+  cp -r /app/seed-data/assets /app/data/assets
+fi
+
 exec node /app/data/serve/app.js
