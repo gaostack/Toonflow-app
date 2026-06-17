@@ -4,6 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createXai } from "@ai-sdk/xai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { wrapLanguageModel, extractReasoningMiddleware } from "ai";
 import axios from "axios";
 
 export interface VendorSnapshot {
@@ -13,6 +14,9 @@ export interface VendorSnapshot {
   modelMeta: any;
   think: boolean;
   thinkLevel: 0 | 1 | 2 | 3;
+  /** Sampling config from o_agentDeploy; passed to DurableAgent's GenerationSettings. */
+  temperature?: number;
+  maxOutputTokens?: number;
 }
 
 /**
@@ -75,6 +79,14 @@ export function toonflowModel(snapshot: VendorSnapshot) {
     if (typeof textRequest !== "function") {
       throw new Error(`vendor ${snapshot.vendorId} did not export textRequest`);
     }
-    return textRequest(snapshot.modelMeta, snapshot.think, snapshot.thinkLevel);
+    const baseModel = textRequest(snapshot.modelMeta, snapshot.think, snapshot.thinkLevel);
+    // Match the old u.Ai.Text().stream() path, which wrapped the model with
+    // extractReasoningMiddleware so models that return their chain-of-thought as
+    // a <reasoning_content> text tag get it split out as reasoning instead of
+    // leaking into the final answer text.
+    return wrapLanguageModel({
+      model: baseModel,
+      middleware: extractReasoningMiddleware({ tagName: "reasoning_content", separator: "\n" }),
+    });
   };
 }

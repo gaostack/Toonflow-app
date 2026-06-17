@@ -55,25 +55,36 @@ export async function readOnlyAgentWorkflow(input: ReadOnlyAgentInput): Promise<
   // safer than letting workflow-sdk try to serialize arbitrary nested values.
   const flowDataJson = JSON.stringify(input.flowData ?? {});
 
+  const tools = {
+    get_flowData: {
+      description: "获取工作区数据（preloaded snapshot — 不再走前端 socket）",
+      inputSchema: z.object({
+        key: z.string().describe("工作区数据 key: script / assets / scriptPlan / storyboardTable / storyboard"),
+      }),
+      execute: ({ key }: { key: string }) => readFlowData({ key, flowDataJson }),
+    },
+  };
+
+  // Sampling config from the snapshot (deploy row), matching the old
+  // u.Ai.Text().stream() path. Empty in mock mode (no vendorSnapshot).
+  const gen: { temperature?: number; maxOutputTokens?: number } = {};
+  if (input.vendorSnapshot?.temperature != null) gen.temperature = input.vendorSnapshot.temperature;
+  if (input.vendorSnapshot?.maxOutputTokens != null) gen.maxOutputTokens = input.vendorSnapshot.maxOutputTokens;
+
   const agent = new DurableAgent({
     model,
     system: input.systemPrompt,
-    tools: {
-      get_flowData: {
-        description: "获取工作区数据（preloaded snapshot — 不再走前端 socket）",
-        inputSchema: z.object({
-          key: z.string().describe("工作区数据 key: script / assets / scriptPlan / storyboardTable / storyboard"),
-        }),
-        execute: ({ key }) => readFlowData({ key, flowDataJson }),
-      },
-    },
+    tools,
+    ...gen,
   });
 
   const writable = getWritable<UIMessageChunk>();
   const result = await agent.stream({
     messages: [{ role: "user", content: input.userPrompt }],
     writable,
-    maxSteps: 8,
+    // Step budget = tool count × 50, matching the old u.Ai.Text().stream() path
+    // (stopWhen: stepCountIs(tools×50)). Durable steps make a high ceiling cheap.
+    maxSteps: Object.keys(tools).length * 50,
   });
 
   const finalText = result.messages
