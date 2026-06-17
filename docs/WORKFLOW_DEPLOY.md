@@ -38,24 +38,59 @@ The Postgres World worker pulls runs from the queue, executes steps, and automat
 
 ## Coolify setup
 
-1. **Add a Postgres service** alongside the Toonflow application in the same Coolify project.
+There are two options for the Postgres instance. **Reusing an existing instance
+with a dedicated logical database is what production currently uses** — it saves
+a whole container while keeping Toonflow's workflow tables isolated.
+
+### Option A (production default) — reuse an existing Postgres instance
+
+1. **Pick any healthy Postgres in the same Coolify network.** Production reuses
+   the shared `pgvector/pgvector` instance (container name = its Coolify UUID,
+   e.g. `uowwkc00csc4ckcgoc4sok4c`). Because both containers are on the
+   `coolify` network, the app reaches it by container name — no public port.
+
+2. **Do NOT manually create the `toonflow_wf` database.** `docker-entrypoint.sh`
+   creates it automatically on boot: it parses the DB name out of
+   `WORKFLOW_POSTGRES_URL`, connects to the instance's default `postgres` admin
+   DB, and runs `CREATE DATABASE` if it doesn't exist (idempotent). This keeps
+   the workflow tables in their own logical DB instead of polluting the shared
+   `postgres` DB. (Requires the `pg` package, which is a direct dependency.)
+
+3. **Set env vars on the Toonflow application** (runtime):
+   - `WORKFLOW_TARGET_WORLD=@workflow/world-postgres`
+   - `WORKFLOW_POSTGRES_URL=postgres://postgres:<pw>@<instance-container-name>:5432/toonflow_wf`
+   - (existing) `NODE_ENV=prod`, `PORT=10588`, etc.
+
+### Option B — dedicated Postgres container
+
+1. **Add a Postgres service** in the Toonflow project.
    - Image: `postgres:16-alpine` (or 15+; any version graphile-worker supports)
    - Persistent volume for `/var/lib/postgresql/data`
-   - Database name e.g. `toonflow_wf` (separate from any application data DB)
+2. Set the same env vars; point `WORKFLOW_POSTGRES_URL` at the new container.
+   The entrypoint auto-create step is a no-op when the DB name is `postgres`,
+   so either name the DB `toonflow_wf` in the URL (auto-created) or rely on the
+   container's own `POSTGRES_DB`.
 
-2. **Set env vars on the Toonflow service**:
-   - `WORKFLOW_TARGET_WORLD=@workflow/world-postgres`
-   - `WORKFLOW_POSTGRES_URL=postgres://postgres:<pw>@<coolify-pg-host>:5432/toonflow_wf`
-   - (existing) `NODE_ENV=prod`, `PORT=10588`, plus whatever Toonflow already uses
+### First deploy & verify (both options)
 
-3. **First deploy** — the entrypoint will detect `WORKFLOW_POSTGRES_URL` and run schema migration before booting the app. Subsequent deploys are idempotent.
+The entrypoint detects `WORKFLOW_POSTGRES_URL`, ensures the database exists, runs
+the (idempotent) schema migration, then boots the app. Startup logs should show:
+```
+Ensuring workflow database exists...
+[db] created database toonflow_wf            # first boot only; "already exists" after
+Applying workflow-postgres schema (idempotent)...
+✅ Database schema created successfully!
+[workflow] world worker started: @workflow/world-postgres
+[workflow] runtime mounted on http://localhost:10588
+[服务启动成功]: http://localhost:10588
+```
+If you instead see no `[workflow] world worker started` line, the app is running
+in **Local World** (env vars not set) — state won't survive redeploys.
 
-4. **Verify** — startup logs should show:
-   ```
-   [workflow] world worker started: @workflow/world-postgres
-   [workflow] runtime mounted on http://localhost:10588
-   [服务启动成功]: http://localhost:10588
-   ```
+> **Image-based deploys**: the Coolify app pulls a prebuilt image from the
+> registry (tag = git short SHA). Code changes only take effect after CI builds
+> and pushes a new image tag and the app redeploys onto it — setting env vars
+> alone won't pull new code.
 
 ## At-least-once semantics
 

@@ -4,6 +4,7 @@ import { z } from "zod";
 import u from "@/utils";
 import Memory from "@/utils/agent/memory";
 import useTools from "@/agents/scriptAgent/tools";
+import { runScriptSubAgent } from "@/agents/scriptAgent/workflowAdapter";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
 import path from "path";
@@ -92,39 +93,43 @@ function createSubAgent(parentCtx: AgentContext) {
   const { resTool, abortSignal } = parentCtx;
   const memory = new Memory("scriptAgent", parentCtx.isolationKey);
 
-  async function runAgent({
+  /**
+   * Workflow-backed runner for read-only sub-agents. Same
+   * lifecycle (complete parent → run → store memory → new parent message) but
+   * the LLM call + tools run inside the durable scriptReadOnlyAgentWorkflow.
+   * The workflow creates/streams its own sub-agent message internally.
+   */
+  async function runWorkflowSubAgent({
     key,
-    prompt,
     system,
     name,
     memoryKey,
-    tools: extraTools,
     messages,
   }: {
     key: `${string}:${string}`;
-    prompt: string;
     system: string;
     name: string;
     memoryKey: string;
-    tools?: Record<string, any>;
-    messages?: { role: "user" | "assistant" | "system"; content: string }[];
+    messages: { role: "user" | "assistant" | "system"; content: string }[];
   }) {
     parentCtx.msg.complete();
-    const subMsg = resTool.newMessage("assistant", name);
 
-    const { fullStream } = await u.Ai.Text(key, parentCtx.thinkConfig.think, parentCtx.thinkConfig.thinlLevel).stream({
-      system,
-      messages: messages ?? [{ role: "user", content: prompt }],
+    const fullResponse = await runScriptSubAgent({
+      agentKey: key,
+      systemPrompt: system,
+      messages,
+      planDataKeys: ["storySkeleton", "adaptationStrategy", "script"],
+      agentLabel: name,
+      msgName: name,
+      resTool,
       abortSignal,
-      tools: { ...extraTools, ...useTools({ resTool, msg: subMsg }) },
+      thinkConfig: { think: parentCtx.thinkConfig.think, thinkLevel: parentCtx.thinkConfig.thinlLevel },
     });
-
-    const fullResponse = await consumeFullStream(fullStream, subMsg);
 
     if (fullResponse.trim()) {
       await memory.add(memoryKey, removeAllXmlTags(fullResponse), {
         name,
-        createTime: new Date(subMsg.datetime).getTime(),
+        createTime: Date.now(),
       });
     }
 
@@ -147,9 +152,8 @@ function createSubAgent(parentCtx: AgentContext) {
 
       const formatPrompt = "\n你必须使用如下XML格式写入工作区：\n<storySkeleton>故事骨架内容</storySkeleton>";
 
-      return runAgent({
+      return runWorkflowSubAgent({
         key: "scriptAgent:storySkeletonAgent",
-        prompt,
         system: systemPrompt + formatPrompt,
         name: "编剧",
         memoryKey: "assistant:execution:storySkeleton",
@@ -167,9 +171,8 @@ function createSubAgent(parentCtx: AgentContext) {
 
       const formatPrompt = "\n你必须使用如下XML格式写入工作区：\n<adaptationStrategy>改编策略内容</adaptationStrategy>";
 
-      return runAgent({
+      return runWorkflowSubAgent({
         key: "scriptAgent:adaptationStrategyAgent",
-        prompt,
         system: systemPrompt + formatPrompt,
         name: "编剧",
         memoryKey: "assistant:execution:adaptationStrategy",
@@ -194,9 +197,8 @@ function createSubAgent(parentCtx: AgentContext) {
 
       const formatPrompt = `\n你必须使用如下XML格式写入工作区：\nXML不得添加任何额外标签<scriptItem name="剧本名称">剧本内容</scriptItem><scriptItem name="剧本名称">剧本内容</scriptItem><scriptItem name="剧本名称">剧本内容</scriptItem>`;
 
-      return runAgent({
+      return runWorkflowSubAgent({
         key: "scriptAgent:scriptAgent",
-        prompt,
         system: systemPrompt + formatPrompt,
         messages: [
           { role: "assistant", content: scriptPrompt + `章节数量：${novelData.length}章` },
@@ -215,12 +217,12 @@ function createSubAgent(parentCtx: AgentContext) {
       const skill = path.join(u.getPath("skills"), "script_agent_supervision.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
 
-      return runAgent({
+      return runWorkflowSubAgent({
         key: "scriptAgent:supervisionAgent",
-        prompt,
         system: systemPrompt,
         name: "编辑",
         memoryKey: "assistant:supervision",
+        messages: [{ role: "user", content: prompt }],
       });
     },
   });

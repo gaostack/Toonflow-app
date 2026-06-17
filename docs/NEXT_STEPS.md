@@ -67,23 +67,33 @@ All 4 mutation-heavy sub-agents run through the workflow (now the only path):
 - Backup/retention: Postgres workflow tables grow with every run — set up periodic cleanup of finished-and-old rows (or check what graphile-worker does by default)
 - Alerts: if any workflow run is "running" for >30 min, surface in admin UI (probably stuck on LLM timeout)
 
-### 3. Re-examine `scriptAgent` (≈unknown)
+### 3. ✅ `scriptAgent` migrated (2026-06-18)
 
-Toonflow has TWO agent stacks: `productionAgent` (this migration's focus) and `scriptAgent`. `scriptAgent` has the same hand-rolled structure (decision/supervision/execution layers) per `src/agents/scriptAgent/`. If production goes well, evaluate doing the same migration. Most patterns transfer directly.
+All 4 `scriptAgent` read-only sub-agents now run through the workflow runtime (the only path); legacy in-process `runAgent` is deleted. The decision layer (`runDecisionAI`) still streams in-process — unchanged, same as productionAgent.
+
+- **Shared runtime extracted** → `src/agents/_shared/workflowRuntime.ts` (`VendorSnapshot`, `bootstrapWorkflowRuntime`, `snapshotVendor`, `prefetchSocketData`, `runInProcessWorkflow`). `productionAgent/workflowAdapter.ts` now imports + re-exports these (so `app.ts` + all spikes are unchanged); it keeps only the mutation-specific code.
+- **Read-only workflow** → `src/workflows/script-read-only-agent.ts`. Hybrid design: `get_planData` is served from a pre-fetched snapshot (socket `getPlanData`, can't run inside a step), while `get_novel_events` / `get_novel_text` / `get_script_content` run as `'use step'` SQLite reads (knex + better-sqlite3 externalized) because they take agent-chosen args and can't be pre-fetched. All read-only — no descriptor-replay machinery.
+- **Adapter** → `src/agents/scriptAgent/workflowAdapter.ts` `runScriptSubAgent` (snapshot vendor + prefetch planData via `getPlanData` + dispatch).
+- **Wiring** → `src/agents/scriptAgent/index.ts` `runWorkflowSubAgent` helper; all 4 sub-agent tools call it.
+- **Smoke test** → `scripts/spike-script-skeleton.ts` (mock model + fake socket, no API key / no DB rows needed).
+- **Remaining**: real-Kimi end-to-end UI verification (storySkeleton / adaptationStrategy / script / supervision); productionAgent regression re-checked (storyboard-gen + derive-assets spikes still pass).
 
 ## Where to read first in a follow-up session
 
 1. **`docs/NEXT_STEPS.md`** — this file
 2. **`docs/WORKFLOW_DEPLOY.md`** — deployment + gotchas
 3. **`wf-poc/FINDINGS.md`** — full architectural rationale + 8 SDK gotchas
-4. **`src/workflows/read-only-agent.ts`** — template for read-only workflows
-5. **`src/workflows/mutation-agent.ts`** — template for mutation workflows + side-effect descriptor protocol
-6. **`src/agents/productionAgent/workflowAdapter.ts`** — bootstrap + chunk dispatch + vendor snapshot + `runMutationSubAgent`/`replayDescriptors`
-7. **`src/agents/productionAgent/index.ts`** — each of the 7 sub-agents now calls `runReadOnlySubAgent`/`runMutationSubAgent` directly (no switch). The decision layer `runDecisionAI` still streams in-process via `consumeFullStream` + `useTools`.
+4. **`src/agents/_shared/workflowRuntime.ts`** — shared runtime (bootstrap, vendor snapshot, socket prefetch, UIMessageChunk→ResTool mapper) used by both agent stacks
+5. **`src/workflows/read-only-agent.ts`** — template for productionAgent read-only workflows (single pre-fetched `get_flowData` snapshot)
+6. **`src/workflows/script-read-only-agent.ts`** — scriptAgent read-only workflow (hybrid: pre-fetched `get_planData` snapshot + in-step SQLite read tools)
+7. **`src/workflows/mutation-agent.ts`** — template for mutation workflows + side-effect descriptor protocol
+8. **`src/agents/productionAgent/workflowAdapter.ts`** — `runReadOnlySubAgent`/`runMutationSubAgent`/`replayDescriptors` (imports shared runtime)
+9. **`src/agents/scriptAgent/workflowAdapter.ts`** — `runScriptSubAgent` (imports shared runtime)
+10. **`src/agents/productionAgent/index.ts`** / **`src/agents/scriptAgent/index.ts`** — sub-agents call the workflow helpers directly (no switch). Both decision layers (`runDecisionAI`) still stream in-process via `consumeFullStream` + `useTools`.
 
 ## What NOT to do without explicit direction
 
-- **Don't delete `consumeFullStream` / `useTools` / `tools.ts`.** They look like leftover legacy code but the decision layer (`runDecisionAI`) still depends on them, and `tools.ts` exports schemas used by routes. Only the sub-agent `runAgent` helper was legacy.
+- **Don't delete `consumeFullStream` / `useTools` / `tools.ts`** (in either `productionAgent/` or `scriptAgent/`). They look like leftover legacy code but each decision layer (`runDecisionAI`) still depends on them, and `tools.ts` exports schemas used by routes. The sub-agent `runAgent` helper was the only legacy piece — now deleted in both stacks.
 - **Don't change `nitro.config.ts` `workflow.dirs` scope.** It's currently `["src/workflows"]` for a reason — wider scope makes nitro try to bundle `data/serve/app.js` and fail.
 - **Don't switch dev away from Local World** unless you specifically need durability testing. Local World is faster + simpler; Postgres adds an external dep + slower startup.
 
@@ -114,6 +124,9 @@ Toonflow has TWO agent stacks: `productionAgent` (this migration's focus) and `s
 ```bash
 # Basic smoke (real Kimi via read-only workflow)
 npx tsx scripts/spike-kimi.ts
+
+# scriptAgent read-only workflow smoke test (mock model, no API key / DB rows needed)
+npx tsx scripts/spike-script-skeleton.ts
 
 # Mutation workflow smoke tests (mock model, no API key needed)
 npx tsx scripts/spike-derive-assets.ts

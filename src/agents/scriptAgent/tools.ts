@@ -3,6 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import _ from "lodash";
 import ResTool from "@/socket/resTool";
+import { queryNovelEvents, queryNovelText, queryScriptContent } from "@/workflows/_queries";
 
 export const ScriptSchema = z.object({
   name: z.string().describe("剧本名称"),
@@ -43,17 +44,12 @@ export default (toolCpnfig: ToolConfig) => {
       execute: async ({ chapterIndexs }) => {
         console.log("[tools] get_novel_events", chapterIndexs);
         const thinking = msg.thinking("正在查询章节事件...");
-        const data = await u
-          .db("o_novel")
-          .where("projectId", resTool.data.projectId)
-          .select("id", "chapterIndex as index", "reel", "chapter", "chapterData", "event", "eventState")
-          .whereIn("chapterIndex", chapterIndexs);
         thinking.appendText("正在查询章节编号: " + chapterIndexs.join(","));
-        const eventString = data.map((i: any) => [`第${i.index}章，标题:${i.chapter}，事件:${i.event}`].join("\n")).join("\n");
+        const eventString = await queryNovelEvents(u.db, resTool.data.projectId, chapterIndexs);
         thinking.appendText("查询结果:\n" + eventString);
         thinking.updateTitle("查询章节事件完成");
         thinking.complete();
-        return eventString ?? "无数据";
+        return eventString;
       },
     }),
     get_planData: tool({
@@ -87,12 +83,11 @@ export default (toolCpnfig: ToolConfig) => {
       execute: async ({ chapterIndex }) => {
         console.log("[tools] get_novel_text", "[tools] get_novel_text", chapterIndex);
         const thinking = msg.thinking(`正在获取小说章节原文...`);
-        const data = await u.db("o_novel").where("projectId", resTool.data.projectId).where({ chapterIndex }).select("chapterData").first();
-        const text = data && data?.chapterData ? data.chapterData : "";
+        const text = await queryNovelText(u.db, resTool.data.projectId, chapterIndex);
         thinking.appendText(`获取到原文:\n` + text);
         thinking.updateTitle(`获取小说章节原文完成`);
         thinking.complete();
-        return text ?? "无数据";
+        return text;
       },
     }),
     get_script_content: tool({
@@ -107,12 +102,11 @@ export default (toolCpnfig: ToolConfig) => {
       execute: async ({ ids }) => {
         console.log("[tools] get_script_content", "[tools] get_script_content", ids);
         const thinking = msg.thinking(`正在获取脚本内容...`);
-        const data = await u.db("o_script").whereIn("id", ids).select("content", "name");
-        const text = data && data.length ? data.map((d) => `<scriptItem name="${d.name}">${d.content}</scriptItem>`).join("\n") : "";
-        thinking.appendText(`获取到脚本内容:\n` + JSON.stringify(data, null, 2));
+        const text = await queryScriptContent(u.db, ids);
+        thinking.appendText(`获取到脚本内容:\n` + text);
         thinking.updateTitle(`获取脚本内容完成`);
         thinking.complete();
-        return text ?? "无数据";
+        return text;
       },
     }),
   };

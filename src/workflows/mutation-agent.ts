@@ -3,9 +3,8 @@ import { mockSequenceModel, type MockResponseDescriptor } from "@workflow/ai/tes
 import { getWritable } from "workflow";
 import { z } from "zod";
 import type { UIMessageChunk } from "ai";
-import type { Knex } from "knex";
-import knex from "knex";
 import { toonflowModel, type VendorSnapshot } from "./toonflow-model.js";
+import { getDb } from "./_db.js";
 import type { ReadOnlyAgentInput } from "./read-only-agent.js";
 
 /**
@@ -72,25 +71,6 @@ export type MutationDescriptor =
         shouldGenerateImage: string;
       };
     };
-
-// Cache Knex instances per dbPath so repeated steps in the same process reuse
-// the connection. The cache is lost on process restart, which is fine — the
-// next step simply opens a new connection.
-const dbCache = new Map<string, Knex>();
-
-function getDb(dbPath: string): Knex {
-  if (!dbCache.has(dbPath)) {
-    dbCache.set(
-      dbPath,
-      knex({
-        client: "better-sqlite3",
-        connection: { filename: dbPath },
-        useNullAsDefault: true,
-      }),
-    );
-  }
-  return dbCache.get(dbPath)!;
-}
 
 async function readFlowData(args: { key: string; flowDataJson: string }): Promise<string> {
   "use step";

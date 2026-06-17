@@ -1,220 +1,27 @@
 import ResTool from "@/socket/resTool";
 import u from "@/utils";
-import * as dotenv from "dotenv";
-import * as path from "path";
-import * as fs from "fs";
-import { transform } from "sucrase";
-import type { Express } from "express";
-import type { Server as HttpServer } from "http";
 import type { MutationDescriptor } from "@/types/mutation-descriptors";
+import {
+  bootstrapWorkflowRuntime,
+  prefetchSocketData,
+  runInProcessWorkflow,
+  snapshotVendor,
+  startAndStreamWorkflow,
+  type RunWorkflowArgs,
+  type VendorSnapshot,
+} from "@/agents/_shared/workflowRuntime";
 
-dotenv.config({ path: path.resolve(process.cwd(), ".env"), quiet: true } as any);
-
-/**
- * Serializable snapshot of a Toonflow vendor at workflow-start time.
- * Crosses the workflow step boundary and is materialized back into a
- * LanguageModelV3 inside the step by toonflowModel().
- */
-export interface VendorSnapshot {
-  vendorId: string;
-  vendorCodeJs: string;
-  vendorInputs: Record<string, string>;
-  modelMeta: any;
-  think: boolean;
-  thinkLevel: 0 | 1 | 2 | 3;
-}
-
-interface RunWorkflowArgs {
-  workflowId: string;
-  args: unknown[];
-  resTool: ResTool;
-  msgName: string;
-  abortSignal?: AbortSignal;
-}
-
-let bundle: any = null;
-let runtimeBootstrapped = false;
+// Re-export the shared runtime surface so existing import sites
+// (src/app.ts, scripts/spike-*.ts) keep importing from this module unchanged.
+export { bootstrapWorkflowRuntime, snapshotVendor, runInProcessWorkflow };
+export type { VendorSnapshot };
 
 /**
- * Mount the workflow runtime middleware onto Toonflow's existing Express app
- * and configure Local World to dispatch handler requests back to this process.
- *
- * Must be called BEFORE server.listen() and BEFORE any auth middleware that
- * would reject the Local World's internal handler dispatches.
- */
-export async function bootstrapWorkflowRuntime(app: Express, server: HttpServer, port: number): Promise<void> {
-  if (runtimeBootstrapped) return;
-
-  const bundlePath = path.resolve(process.cwd(), ".output/server/index.mjs");
-  if (!fs.existsSync(bundlePath)) {
-    console.warn(`[workflow] bundle not found at ${bundlePath} — run "yarn build:workflows" first`);
-    return;
-  }
-
-  // Local World handler dispatches back to this very process; Postgres World
-  // doesn't need the base URL (its worker pulls from PG queue directly).
-  process.env.WORKFLOW_LOCAL_BASE_URL = `http://localhost:${port}`;
-
-  // Dynamic specifier so esbuild does NOT inline the multi-MB bundle.
-  const specifier = bundlePath;
-  bundle = await import(specifier);
-
-  // The bundled workflow runtime contains a catch-all /** route (from
-  // nitro.config.ts) that would otherwise swallow every request before it
-  // reaches Toonflow's own static files / API router. Only dispatch into it
-  // for the workflow-internal endpoints Local World actually uses.
-  app.use((req: any, res: any, next: any) => {
-    if (
-      req.path?.startsWith("/.well-known/workflow") ||
-      req.path === "/_workflow"
-    ) {
-      return bundle.middleware(req, res, next);
-    }
-    next();
-  });
-  server.on("upgrade", (req: any, socket: any, head: any) => {
-    if (req.url?.startsWith?.("/socket.io")) return;
-    if (typeof bundle.handleUpgrade === "function") bundle.handleUpgrade(req, socket, head);
-  });
-
-  // Production Worlds (Postgres / Vercel) require explicit start() to subscribe
-  // their worker to the queue and recover orphan runs. Local World's worker is
-  // implicit + in-process, and start() trips on the bundled "version" sentinel
-  // in esbuild output, so skip it there.
-  if (process.env.WORKFLOW_TARGET_WORLD) {
-    try {
-      const { getWorld } = await import("workflow/runtime");
-      const world = await getWorld();
-      await world.start?.();
-      console.log(`[workflow] world worker started: ${process.env.WORKFLOW_TARGET_WORLD}`);
-    } catch (e) {
-      console.error("[workflow] failed to start world worker:", e);
-    }
-  }
-
-  runtimeBootstrapped = true;
-  console.log(`[workflow] runtime mounted on http://localhost:${port}`);
-}
-
-/**
- * Build a VendorSnapshot for the given agent by replaying Toonflow's existing
- * vendor abstraction (o_agentDeploy → o_vendorConfig → data/vendor/<id>.ts).
- *
- * Returns null if no vendor can be resolved — caller should fall back to mock.
- *
- * For dev convenience: if KIMI_API_KEY is set in env and DB has no Kimi key,
- * patch the inputValues with the env key so we don't have to round-trip
- * through the UI.
- */
-export async function snapshotVendor(agentKey: string): Promise<VendorSnapshot | null> {
-  if (process.env.TOONFLOW_WORKFLOW_FORCE_MOCK === "1") return null;
-
-  const setting = await u.db("o_setting").where("key", "agentUseMode").first();
-  const useAdvanced = setting?.value === "1";
-
-  let deployRow: any = null;
-  if (useAdvanced) {
-    deployRow = await u.db("o_agentDeploy").where("key", agentKey).first();
-  }
-  if (!deployRow?.modelName) {
-    const [mainly] = agentKey.split(/:(.+)/);
-    deployRow = await u.db("o_agentDeploy").where("key", mainly).first();
-  }
-
-  // Dev fallback: if there's no deploy mapping yet but KIMI_API_KEY is in env,
-  // pretend the agent is wired to kimicoding so we can dogfood end-to-end
-  // without the UI round-trip. Production paths must rely on real DB config.
-  let resolvedModelName: string | undefined = deployRow?.modelName;
-  if (!resolvedModelName && process.env.KIMI_API_KEY) {
-    resolvedModelName = "kimicoding:kimi-for-coding";
-    console.warn(`[workflowAdapter] no deploy config for ${agentKey} — using KIMI_API_KEY env fallback`);
-  }
-  if (!resolvedModelName) {
-    console.warn(`[workflowAdapter] no deploy config for ${agentKey}`);
-    return null;
-  }
-
-  const [vendorId, modelName] = resolvedModelName.split(/:(.+)/);
-
-  const vendorRow = await u.db("o_vendorConfig").where("id", vendorId).first();
-  if (!vendorRow) {
-    console.warn(`[workflowAdapter] vendor ${vendorId} not registered`);
-    return null;
-  }
-
-  let vendorInputs: Record<string, string> = {};
-  try {
-    vendorInputs = JSON.parse(vendorRow.inputValues ?? "{}");
-  } catch { }
-
-  // Dev fallback: env-supplied Kimi key beats empty DB.
-  if (vendorId === "kimicoding" && !vendorInputs.apiKey && process.env.KIMI_API_KEY) {
-    vendorInputs = {
-      ...vendorInputs,
-      apiKey: process.env.KIMI_API_KEY.replace(/^Bearer\s+/i, ""),
-      baseUrl: vendorInputs.baseUrl || process.env.KIMI_BASE_URL || "https://api.kimi.com/coding/v1",
-    };
-  }
-
-  if (!vendorInputs.apiKey) {
-    console.warn(`[workflowAdapter] vendor ${vendorId} has no apiKey configured`);
-    return null;
-  }
-
-  const modelList = await u.vendor.getModelList(vendorId);
-  const modelMeta = modelList.find((m: any) => m.modelName === modelName);
-  if (!modelMeta) {
-    console.warn(`[workflowAdapter] model ${modelName} not in vendor ${vendorId} model list`);
-    return null;
-  }
-
-  const tsCode = u.vendor.getCode(vendorId);
-  if (!tsCode) {
-    console.warn(`[workflowAdapter] vendor ${vendorId} code file missing`);
-    return null;
-  }
-  const vendorCodeJs = transform(tsCode, { transforms: ["typescript"] }).code;
-
-  return {
-    vendorId,
-    vendorCodeJs,
-    vendorInputs,
-    modelMeta,
-    think: !!modelMeta.think,
-    thinkLevel: 0,
-  };
-}
-
-/**
- * Pre-fetch workspace data via Socket.IO callback to the frontend. Runs in the
- * Toonflow main process BEFORE the workflow starts so the workflow itself can
- * be deterministic + replayable.
+ * Pre-fetch productionAgent workspace data via the frontend "getFlowData"
+ * socket event. Thin wrapper over the shared prefetch helper.
  */
 export async function prefetchFlowData(resTool: ResTool, keys: string[]): Promise<Record<string, unknown>> {
-  const socket = resTool.socket;
-  const result: Record<string, unknown> = {};
-  for (const key of keys) {
-    // Network/timeout failures throw — silently substituting null would cause
-    // the LLM to hallucinate without input data. Frontend explicitly returning
-    // a value (including null/undefined for "no data") is fine and preserved.
-    const flowData: any = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`prefetchFlowData "${key}" timed out after 30s`)), 30_000);
-      try {
-        socket.emit("getFlowData", { key }, (res: any) => {
-          clearTimeout(timeout);
-          resolve(res);
-        });
-      } catch (e) {
-        clearTimeout(timeout);
-        reject(e);
-      }
-    });
-    result[key] = flowData?.[key];
-    if (result[key] == null) {
-      console.warn(`[workflowAdapter] prefetch "${key}" returned no data — agent will see (no preloaded data...) when it calls get_flowData`);
-    }
-  }
-  return result;
+  return prefetchSocketData(resTool, keys, "getFlowData");
 }
 
 /**
@@ -252,110 +59,6 @@ export async function runReadOnlySubAgent(opts: {
     msgName: opts.msgName,
     abortSignal: opts.abortSignal,
   });
-}
-
-/**
- * Start a workflow in-process via the mounted runtime, read its UIMessageChunk
- * stream, and emit each chunk as the equivalent ResTool method on a new sub-agent
- * message. Returns the accumulated assistant text.
- */
-export async function runInProcessWorkflow({ workflowId, args, resTool, msgName, abortSignal }: RunWorkflowArgs): Promise<string> {
-  if (!runtimeBootstrapped) {
-    throw new Error("workflow runtime not bootstrapped — call bootstrapWorkflowRuntime() during app startup");
-  }
-
-  const msg = resTool.newMessage("assistant", msgName);
-  const textStreams = new Map<string, ReturnType<typeof msg.text>>();
-  const thinkingStreams = new Map<string, ReturnType<typeof msg.thinking>>();
-  let accumulatedText = "";
-
-  const { start } = await import("workflow/api");
-  let run: any;
-  try {
-    run = await start({ workflowId } as any, args as any);
-  } catch (e: any) {
-    msg.error(`workflow start failed: ${e?.message ?? e}`);
-    throw e;
-  }
-
-  const reader = run.readable.getReader();
-  const onAbort = () => {
-    try { reader.cancel(); } catch { }
-  };
-  abortSignal?.addEventListener?.("abort", onAbort);
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk: any = value;
-      if (!chunk || typeof chunk !== "object" || !chunk.type) continue;
-
-      switch (chunk.type) {
-        case "text-start": {
-          const stream = msg.text();
-          textStreams.set(chunk.id, stream);
-          break;
-        }
-        case "text-delta": {
-          const stream = textStreams.get(chunk.id);
-          if (stream && chunk.delta) {
-            stream.append(chunk.delta);
-            accumulatedText += chunk.delta;
-          }
-          break;
-        }
-        case "text-end": {
-          textStreams.get(chunk.id)?.complete();
-          textStreams.delete(chunk.id);
-          break;
-        }
-        case "reasoning-start": {
-          const stream = msg.thinking("思考中...");
-          thinkingStreams.set(chunk.id, stream);
-          break;
-        }
-        case "reasoning-delta": {
-          thinkingStreams.get(chunk.id)?.append(chunk.delta ?? "");
-          break;
-        }
-        case "reasoning-end": {
-          thinkingStreams.get(chunk.id)?.complete();
-          thinkingStreams.delete(chunk.id);
-          break;
-        }
-        case "tool-input-available": {
-          msg.toolCall({
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName,
-            args: chunk.input,
-          } as any);
-          break;
-        }
-        case "tool-output-available": {
-          msg.activity("toolResult", { toolCallId: chunk.toolCallId, output: chunk.output });
-          break;
-        }
-        default: {
-          if (typeof chunk.type === "string" && chunk.type.startsWith("data-")) {
-            msg.activity(chunk.type.slice(5), chunk.data ?? {});
-          }
-          break;
-        }
-      }
-    }
-    msg.complete();
-  } catch (err: any) {
-    for (const s of textStreams.values()) s.complete();
-    for (const s of thinkingStreams.values()) s.complete();
-    msg.error(err?.message ?? String(err));
-    throw err;
-  } finally {
-    abortSignal?.removeEventListener?.("abort", onAbort);
-    reader.releaseLock();
-  }
-
-  return accumulatedText;
 }
 
 /**
@@ -426,112 +129,12 @@ export async function runMutationSubAgent(opts: {
 }
 
 /**
- * Run a mutation workflow, consume its default UIMessageChunk stream, and then
- * collect the side-effect descriptors from the "mutation-descriptors" namespace.
+ * Run a mutation workflow, consume its default UIMessageChunk stream (via the
+ * shared mapper), and then collect the side-effect descriptors from the
+ * "mutation-descriptors" namespace.
  */
-async function runMutationWorkflow({
-  workflowId,
-  args,
-  resTool,
-  msgName,
-  abortSignal,
-}: RunWorkflowArgs): Promise<{ finalText: string; descriptors: MutationDescriptor[] }> {
-  if (!runtimeBootstrapped) {
-    throw new Error("workflow runtime not bootstrapped — call bootstrapWorkflowRuntime() during app startup");
-  }
-
-  const msg = resTool.newMessage("assistant", msgName);
-  const textStreams = new Map<string, ReturnType<typeof msg.text>>();
-  const thinkingStreams = new Map<string, ReturnType<typeof msg.thinking>>();
-  let accumulatedText = "";
-
-  const { start } = await import("workflow/api");
-  let run: any;
-  try {
-    run = await start({ workflowId } as any, args as any);
-  } catch (e: any) {
-    msg.error(`workflow start failed: ${e?.message ?? e}`);
-    throw e;
-  }
-
-  const reader = run.readable.getReader();
-  const onAbort = () => {
-    try {
-      reader.cancel();
-    } catch {}
-  };
-  abortSignal?.addEventListener?.("abort", onAbort);
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk: any = value;
-      if (!chunk || typeof chunk !== "object" || !chunk.type) continue;
-
-      switch (chunk.type) {
-        case "text-start": {
-          const stream = msg.text();
-          textStreams.set(chunk.id, stream);
-          break;
-        }
-        case "text-delta": {
-          const stream = textStreams.get(chunk.id);
-          if (stream && chunk.delta) {
-            stream.append(chunk.delta);
-            accumulatedText += chunk.delta;
-          }
-          break;
-        }
-        case "text-end": {
-          textStreams.get(chunk.id)?.complete();
-          textStreams.delete(chunk.id);
-          break;
-        }
-        case "reasoning-start": {
-          const stream = msg.thinking("思考中...");
-          thinkingStreams.set(chunk.id, stream);
-          break;
-        }
-        case "reasoning-delta": {
-          thinkingStreams.get(chunk.id)?.append(chunk.delta ?? "");
-          break;
-        }
-        case "reasoning-end": {
-          thinkingStreams.get(chunk.id)?.complete();
-          thinkingStreams.delete(chunk.id);
-          break;
-        }
-        case "tool-input-available": {
-          msg.toolCall({
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName,
-            args: chunk.input,
-          } as any);
-          break;
-        }
-        case "tool-output-available": {
-          msg.activity("toolResult", { toolCallId: chunk.toolCallId, output: chunk.output });
-          break;
-        }
-        default: {
-          if (typeof chunk.type === "string" && chunk.type.startsWith("data-")) {
-            msg.activity(chunk.type.slice(5), chunk.data ?? {});
-          }
-          break;
-        }
-      }
-    }
-    msg.complete();
-  } catch (err: any) {
-    for (const s of textStreams.values()) s.complete();
-    for (const s of thinkingStreams.values()) s.complete();
-    msg.error(err?.message ?? String(err));
-    throw err;
-  } finally {
-    abortSignal?.removeEventListener?.("abort", onAbort);
-    reader.releaseLock();
-  }
+async function runMutationWorkflow(opts: RunWorkflowArgs): Promise<{ finalText: string; descriptors: MutationDescriptor[] }> {
+  const { text, run } = await startAndStreamWorkflow(opts);
 
   // Collect side-effect descriptors from the namespaced stream.
   const descriptors: MutationDescriptor[] = [];
@@ -550,7 +153,7 @@ async function runMutationWorkflow({
     console.error("[workflowAdapter] failed to read mutation-descriptors stream:", e);
   }
 
-  return { finalText: accumulatedText, descriptors };
+  return { finalText: text, descriptors };
 }
 
 /**
