@@ -57,3 +57,9 @@ data/test.sqlite
 version.txt
 
 .mcp.json
+
+.workflow-data/*
+.output/*
+
+# 构建产物（Docker 构建时由 yarn build 现场重建，无需提交）
+data/serve/app.js

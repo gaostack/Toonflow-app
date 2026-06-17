@@ -2,8 +2,8 @@
   "compilerOptions": {
     "ignoreDeprecations": "5.0",
     "target": "ESNext",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": true,
@@ -28,6 +28,9 @@
     "node_modules",
     "data/**/*.ts",
     "dist",
-    "build"
+    "build",
+    "src/workflows",
+    ".output",
+    "nitro.config.ts"
   ]
 }

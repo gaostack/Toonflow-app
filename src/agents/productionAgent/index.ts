@@ -6,6 +6,7 @@ import Memory from "@/utils/agent/memory";
 import { createSkillTools, parseFrontmatter, scanSkills, useSkill } from "@/utils/agent/skillsTools";
 import useTools from "@/agents/productionAgent/tools";
 import ResTool from "@/socket/resTool";
+import { runReadOnlySubAgent, runMutationSubAgent } from "@/agents/productionAgent/workflowAdapter";
 import * as fs from "fs";
 import path from "path";
 
@@ -97,45 +98,6 @@ export async function runDecisionAI(ctx: AgentContext) {
 async function createSubAgent(parentCtx: AgentContext) {
   const { resTool, abortSignal } = parentCtx;
   const memory = new Memory("productionAgent", parentCtx.isolationKey);
-  async function runAgent({
-    key,
-    prompt,
-    system,
-    name,
-    memoryKey,
-    tools: extraTools,
-    messages,
-  }: {
-    key: `${string}:${string}`;
-    prompt: string;
-    system: string;
-    name: string;
-    memoryKey: string;
-    tools?: Record<string, any>;
-    messages?: { role: "user" | "assistant" | "system"; content: string }[];
-  }) {
-    parentCtx.msg.complete();
-    const subMsg = resTool.newMessage("assistant", name);
-
-    const { fullStream } = await u.Ai.Text(key, parentCtx.thinkConfig.think, parentCtx.thinkConfig.thinlLevel).stream({
-      system,
-      messages: messages ?? [{ role: "user", content: prompt }],
-      abortSignal,
-      tools: { ...extraTools, ...useTools({ resTool, msg: subMsg }) },
-    });
-
-    const fullResponse = await consumeFullStream(fullStream, subMsg);
-
-    if (fullResponse.trim()) {
-      await memory.add(memoryKey, removeAllXmlTags(fullResponse), {
-        name,
-        createTime: new Date(subMsg.datetime).getTime(),
-      });
-    }
-
-    parentCtx.msg = resTool.newMessage("assistant", "视频策划");
-    return fullResponse;
-  }
 
   const promptInput = z
     .object({
@@ -200,18 +162,27 @@ async function createSubAgent(parentCtx: AgentContext) {
     execute: async ({ prompt }) => {
       const skill = path.join(u.getPath("skills"), "production_execution_derive_assets.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
-      return runAgent({
-        key: "productionAgent:deriveAssetsAgent",
-        prompt,
-        system: systemPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: artSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt },
-        ],
-        tools: { activate_skill: artSkills.tools.activate_skill },
+
+      parentCtx.msg.complete();
+      const result = await runMutationSubAgent({
+        agentKey: "productionAgent:deriveAssetsAgent",
+        systemPrompt: systemPrompt + "\n\n" + artSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt,
+        flowDataKeys: ["script", "assets"],
+        agentLabel: "deriveAssets",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
+        allowedTools: ["add_deriveAsset", "del_deriveAsset", "generate_deriveAsset"],
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -222,18 +193,27 @@ async function createSubAgent(parentCtx: AgentContext) {
     execute: async ({ prompt }) => {
       const skill = path.join(u.getPath("skills"), "production_execution_generate_assets.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
-      return runAgent({
-        key: "productionAgent:generateAssetsAgent",
-        prompt,
-        system: systemPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: artSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt },
-        ],
-        tools: { activate_skill: artSkills.tools.activate_skill },
+
+      parentCtx.msg.complete();
+      const result = await runMutationSubAgent({
+        agentKey: "productionAgent:generateAssetsAgent",
+        systemPrompt: systemPrompt + "\n\n" + artSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt,
+        flowDataKeys: ["assets"],
+        agentLabel: "generateAssets",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
+        allowedTools: ["generate_deriveAsset"],
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -247,18 +227,25 @@ async function createSubAgent(parentCtx: AgentContext) {
 
       const addPrompt = "\n你必须使用如下XML格式写入工作区：\n```\n<scriptPlan>内容</scriptPlan>\n```";
 
-      return runAgent({
-        key: "productionAgent:directorPlanAgent",
-        prompt,
-        system: systemPrompt + addPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: artSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt + addPrompt },
-        ],
-        tools: { activate_skill: artSkills.tools.activate_skill },
+      parentCtx.msg.complete();
+      const result = await runReadOnlySubAgent({
+        agentKey: "productionAgent:directorPlanAgent",
+        systemPrompt: systemPrompt + addPrompt + "\n\n" + artSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt + addPrompt,
+        flowDataKeys: ["script"],
+        agentLabel: "directorPlan",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -269,18 +256,27 @@ async function createSubAgent(parentCtx: AgentContext) {
     execute: async ({ prompt }) => {
       const skill = path.join(u.getPath("skills"), "production_execution_storyboard_gen.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
-      return runAgent({
-        key: "productionAgent:storyboardGenAgent",
-        prompt,
-        system: systemPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: artSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt },
-        ],
-        tools: { activate_skill: artSkills.tools.activate_skill },
+
+      parentCtx.msg.complete();
+      const result = await runMutationSubAgent({
+        agentKey: "productionAgent:storyboardGenAgent",
+        systemPrompt: systemPrompt + "\n\n" + artSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt,
+        flowDataKeys: ["storyboardTable", "storyboard"],
+        agentLabel: "storyboardGen",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
+        allowedTools: ["generate_storyboard"],
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -307,18 +303,26 @@ async function createSubAgent(parentCtx: AgentContext) {
       const addPrompt =
         "\n你必须使用如下XML格式写入工作区：\n```\n<storyboardItem videoDesc='视频描述' prompt=提示词内容 track='分组' shouldGenerateImage='true/false' duration='视频推荐时间' associateAssetsIds='[该分镜所需的资产ID列表]'></storyboardItem>\n```";
 
-      return runAgent({
-        key: "productionAgent:storyboardPanelAgent",
-        prompt,
-        system: systemPrompt + addPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: productionSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt + addPrompt },
-        ],
-        tools: { activate_skill: productionSkills.tools.activate_skill },
+      parentCtx.msg.complete();
+      const result = await runMutationSubAgent({
+        agentKey: "productionAgent:storyboardPanelAgent",
+        systemPrompt: systemPrompt + addPrompt + "\n\n" + productionSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt + addPrompt,
+        flowDataKeys: ["script", "assets", "scriptPlan", "storyboardTable"],
+        agentLabel: "storyboardPanel",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
+        allowedTools: ["add_flowData_storyboard"],
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -332,18 +336,25 @@ async function createSubAgent(parentCtx: AgentContext) {
 
       const addPrompt = "\n你必须使用如下XML格式写入工作区：\n```\n<storyboardTable>内容</storyboardTable>\n```";
 
-      return runAgent({
-        key: "productionAgent:storyboardTableAgent",
-        prompt,
-        system: systemPrompt + addPrompt,
-        name: "执行导演",
-        memoryKey: "assistant:execution",
-        messages: [
-          { role: "assistant", content: productionSkills.prompt + `\n${modelInfo}` },
-          { role: "user", content: prompt + addPrompt },
-        ],
-        tools: { activate_skill: productionSkills.tools.activate_skill },
+      parentCtx.msg.complete();
+      const result = await runReadOnlySubAgent({
+        agentKey: "productionAgent:storyboardTableAgent",
+        systemPrompt: systemPrompt + addPrompt + "\n\n" + productionSkills.prompt + "\n" + modelInfo,
+        userPrompt: prompt + addPrompt,
+        flowDataKeys: ["script", "assets", "scriptPlan"],
+        agentLabel: "storyboardTable",
+        msgName: "执行导演",
+        resTool,
+        abortSignal,
       });
+      if (result.trim()) {
+        await memory.add("assistant:execution", removeAllXmlTags(result), {
+          name: "执行导演",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 
@@ -353,13 +364,26 @@ async function createSubAgent(parentCtx: AgentContext) {
     execute: async ({ prompt }) => {
       const skill = path.join(u.getPath("skills"), "production_agent_supervision.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
-      return runAgent({
-        key: "productionAgent:supervisionAgent",
-        prompt,
-        system: systemPrompt,
-        name: "监制",
-        memoryKey: "assistant:supervision",
+
+      parentCtx.msg.complete();
+      const result = await runReadOnlySubAgent({
+        agentKey: "productionAgent:supervisionAgent",
+        systemPrompt,
+        userPrompt: prompt,
+        flowDataKeys: ["storyboardTable", "script", "assets"],
+        agentLabel: "supervision",
+        msgName: "监制",
+        resTool,
+        abortSignal,
       });
+      if (result.trim()) {
+        await memory.add("assistant:supervision", removeAllXmlTags(result), {
+          name: "监制",
+          createTime: Date.now(),
+        });
+      }
+      parentCtx.msg = resTool.newMessage("assistant", "视频策划");
+      return result;
     },
   });
 

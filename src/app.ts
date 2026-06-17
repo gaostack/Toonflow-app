@@ -15,6 +15,7 @@ import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
+import { bootstrapWorkflowRuntime } from "@/agents/productionAgent/workflowAdapter";
 
 const app = express();
 const server = http.createServer(app);
@@ -56,6 +57,27 @@ export default async function startServe(randomPort: Boolean = false) {
 
   app.use(logger("dev"));
   app.use(cors({ origin: "*" }));
+
+  // Listen FIRST so we know the real port (matters when randomPort=true in
+  // Electron — without this, Local World would have its WORKFLOW_LOCAL_BASE_URL
+  // pinned to a port the server isn't actually on, hanging the first step).
+  // The brief window between listen and the rest of middleware mounting is
+  // safe: no client traffic is accepted at this point.
+  const requestedPort = randomPort ? 0 : 10588;
+  await new Promise<void>((resolve) => server.listen(requestedPort, () => resolve()));
+  const address = server.address();
+  const realPort = typeof address === "string" ? Number(address) : (address?.port ?? requestedPort);
+  console.log(`[服务启动成功]: http://localhost:${realPort}`);
+
+  // Mount workflow-runtime BEFORE body-parsing middleware so workflow handlers
+  // receive the raw JSON body. Must also be before auth middleware so Local
+  // World's internal handler dispatches aren't blocked.
+  try {
+    await bootstrapWorkflowRuntime(app, server, realPort);
+  } catch (e) {
+    console.error("[workflow] bootstrap failed:", e);
+  }
+
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ extended: true, limit: "100mb" }));
 
@@ -185,15 +207,9 @@ export default async function startServe(randomPort: Boolean = false) {
     res.status(err.status || 500).send(err);
   });
 
-  const port = randomPort ? 0 : 10588;
-  return await new Promise((resolve) => {
-    server.listen(port, async () => {
-      const address = server.address();
-      const realPort = typeof address === "string" ? address : address?.port;
-      console.log(`[服务启动成功]: http://localhost:${realPort}`);
-      resolve(realPort);
-    });
-  });
+  // Server is already listening (bound earlier so workflow runtime knows the
+  // real port). Just return the resolved port.
+  return realPort;
 }
 
 // 支持await关闭

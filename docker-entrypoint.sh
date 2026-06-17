@@ -36,4 +36,13 @@ if [ ! -f /app/data/assets/ending.mp4 ]; then
   cp -rn /app/seed-data/assets/. /app/data/assets/
 fi
 
+# Apply Postgres World schema if a connection URL is configured. The migration
+# script is idempotent — safe to run on every boot. Skipped silently if env not
+# set, in which case the app falls back to Local World (dev only; no durable
+# resume across restart).
+if [ -n "$WORKFLOW_POSTGRES_URL" ]; then
+  echo "Applying workflow-postgres schema (idempotent)..."
+  npx workflow-postgres-setup || { echo "ERROR: workflow-postgres-setup failed"; exit 1; }
+fi
+
 exec node /app/serve/app.js

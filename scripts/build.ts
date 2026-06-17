@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import fs from "fs";
 import path from "path";
+import { spawn } from "node:child_process";
 
 // 打包默认使用 prod 环境变量
 if (!process.env.NODE_ENV) {
@@ -68,15 +69,41 @@ const mainBuildConfig: esbuild.BuildOptions = {
   },
 };
 
+function buildWorkflows(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("npx", ["nitro", "build"], { stdio: "inherit", shell: false });
+    proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`nitro build exited ${code}`))));
+    proc.on("error", reject);
+  });
+}
+
+const workflowsOnly = process.argv.includes("--workflows-only");
+
 (async () => {
   try {
     console.log("🔨 开始构建...\n");
 
-    // 并行构建
-    await Promise.all([esbuild.build(appBuildConfig), esbuild.build(mainBuildConfig)]);
+    // Workflow bundle first — its discovery scans the source tree, so we
+    // must remove any stale esbuild output. Otherwise nitro tries to bundle
+    // data/serve/app.js as a workflow file and chokes on "module" / "tedious"
+    // / "mysql" etc. that it can't resolve.
+    console.log("🔧 构建 workflow runtime (nitro)...");
+    for (const stale of ["data/serve/app.js", "build/main.js", ".output"]) {
+      fs.rmSync(path.resolve(stale), { recursive: true, force: true });
+    }
+    await buildWorkflows();
+    console.log("✅ Workflow runtime 构建完成: .output/server/index.mjs\n");
 
-    console.log("✅ 后端服务构建完成: build/app.js");
+    if (workflowsOnly) {
+      console.log("\n🎉 workflow runtime 单独构建完成!\n");
+      return;
+    }
+
+    console.log("🔧 构建后端服务 + Electron 主进程 (esbuild)...");
+    await Promise.all([esbuild.build(appBuildConfig), esbuild.build(mainBuildConfig)]);
+    console.log("✅ 后端服务构建完成: data/serve/app.js");
     console.log("✅ Electron主进程构建完成: build/main.js");
+
     console.log("\n🎉 所有构建任务完成!\n");
   } catch (err) {
     console.error("❌ 构建失败:", err);

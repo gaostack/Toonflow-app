@@ -1,0 +1,10 @@
+{
+  "watch": ["src/workflows", "nitro.config.ts"],
+  "ext": "ts",
+  "ignore": [".git", "node_modules", ".output", "data", "build", "dist"],
+  "delay": 1000,
+  "runOnChangeOnly": false,
+  "events": {
+    "restart": ""
+  }
+}

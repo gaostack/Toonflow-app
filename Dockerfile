@@ -46,6 +46,11 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
 
+# Workflow runtime bundle (built by nitro inside scripts/build.ts).
+# bootstrapWorkflowRuntime() loads this via path.resolve(process.cwd(), ".output/server/index.mjs").
+# Lives outside /app/data so each deployment ships fresh workflow code (mirrors the /app/serve pattern).
+COPY --from=builder /app/.output ./.output
+
 RUN chmod +x /app/docker-entrypoint.sh
 
 # data 目录通过 Coolify 持久化卷挂载
