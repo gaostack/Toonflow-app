@@ -1,0 +1,10 @@
+[mcp_servers.coolify]
+command = "npx"
+args = [
+    "-y",
+    "@masonator/coolify-mcp",
+]
+
+[mcp_servers.coolify.env]
+COOLIFY_BASE_URL = "https://coolify.styleva.cn"
+COOLIFY_ACCESS_TOKEN = "7|RytRxCTa6OFZre9L2qjefnl62Egu5aB4qXOTtZiveb84dd79"
